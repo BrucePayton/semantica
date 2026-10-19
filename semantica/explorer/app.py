@@ -170,6 +170,7 @@ def create_app(
     from .routes.analytics import router as analytics_router
     from .routes.annotations import router as annotations_router
     from .routes.decisions import router as decisions_router
+    from .routes.conflicts import router as conflicts_router
     from .routes.enrich import router as enrich_router
     from .routes.export_import import router as export_import_router
     from .routes.graph import router as graph_router
@@ -185,6 +186,7 @@ def create_app(
     app.include_router(graph_router, dependencies=_auth)
     app.include_router(analytics_router, dependencies=_auth)
     app.include_router(decisions_router, dependencies=_auth)
+    app.include_router(conflicts_router, dependencies=_auth)
     app.include_router(temporal_router, dependencies=_auth)
     app.include_router(enrich_router, dependencies=_auth)
     app.include_router(export_import_router, dependencies=_auth)

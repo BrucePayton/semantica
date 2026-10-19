@@ -189,6 +189,7 @@ from .methods import (
 from .registry import MethodRegistry, method_registry
 
 _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
+    "WeKnoraIngestor": (".weknora_ingestor", "WeKnoraIngestor"),
     # Web ingestion
     "WebIngestor": (".web_ingestor", "WebIngestor"),
     "WebContent": (".web_ingestor", "WebContent"),
@@ -504,6 +505,7 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "WeKnoraIngestor",
     # File ingestion
     "FileIngestor",
     "FileObject",

@@ -26,6 +26,7 @@ const DiffMergeWorkspace = lazy(() => import('./workspaces/DiffMergeWorkspace/Di
 const GraphWorkspace = lazy(() => import('./workspaces/GraphWorkspace/GraphWorkspace').then((module) => ({ default: module.GraphWorkspace })));
 const MemoryWorkspace = lazy(() => import('./workspaces/MemoryWorkspace').then((module) => ({ default: module.MemoryWorkspace })));
 const ImportExportWorkspace = lazy(() => import('./workspaces/ImportExportWorkspace/ImportExportWorkspace').then((module) => ({ default: module.ImportExportWorkspace })));
+const ConflictWorkspace = lazy(() => import('./workspaces/ConflictWorkspace').then((module) => ({ default: module.ConflictWorkspace })));
 const LineageDiagram = lazy(() => import('./workspaces/LineageWorkspace/LineageDiagram').then((module) => ({ default: module.LineageDiagram })));
 const ReasoningWorkspace = lazy(() => import('./workspaces/ReasoningWorkspace').then((module) => ({ default: module.ReasoningWorkspace })));
 const SparqlWorkspace = lazy(() => import('./workspaces/SparqlWorkspace/SparqlWorkspace').then((module) => ({ default: module.SparqlWorkspace })));
@@ -38,7 +39,7 @@ const OntologyWorkspace = lazy(() => import('./workspaces/OntologyWorkspace').th
 
 type WorkspaceId = 'welcome' | 'explore' | 'analyze' | 'decisions' | 'enrich' | 'manage' | 'ontology-hub';
 type AnalyzeView = 'sparql' | 'reasoning';
-type EnrichView = 'import' | 'merge' | 'registry' | 'resolve';
+type EnrichView = 'import' | 'merge' | 'registry' | 'resolve' | 'conflicts';
 type ManageView = 'lineage' | 'kg-overview' | 'ontology';
 
 type NavItem = {
@@ -97,6 +98,7 @@ const navItems: NavItem[] = [
 ];
 
 function readInitialWorkspace(): WorkspaceId {
+  if (new URLSearchParams(window.location.search).get('workspace') === 'conflicts') return 'enrich';
   return hasOntologyUrlState() ? 'ontology-hub' : 'welcome';
 }
 
@@ -1783,7 +1785,7 @@ export default function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(readInitialWorkspace);
   const [exploreView, setExploreView] = useState<ExploreView>('graph');
   const [analyzeView, setAnalyzeView] = useState<AnalyzeView>('reasoning');
-  const [enrichView, setEnrichView] = useState<EnrichView>('import');
+  const [enrichView, setEnrichView] = useState<EnrichView>(() => new URLSearchParams(window.location.search).get('workspace') === 'conflicts' ? 'conflicts' : 'import');
   const [manageView, setManageView] = useState<ManageView>('lineage');
   const [graphFocusRequest, setGraphFocusRequest] = useState<{ nodeId: string; token: number } | null>(null);
   const [exploreDraftDirty, setExploreDraftDirty] = useState(false);
@@ -1937,12 +1939,16 @@ export default function App() {
               <button className="workspace-tab" data-active={enrichView === 'registry'} onClick={() => setEnrichView('registry')}>
                 Registry
               </button>
+              <button className="workspace-tab" data-active={enrichView === 'conflicts'} onClick={() => setEnrichView('conflicts')}>
+                文档冲突检测
+              </button>
             </>
           }
         >
           <ErrorBoundary key={`enrich-${enrichView}`}>
             <Suspense fallback={<WorkspaceFallback />}>
               {enrichView === 'import' ? <ImportExportWorkspace /> :
+               enrichView === 'conflicts' ? <ConflictWorkspace /> :
                enrichView === 'merge' ? <DiffMergeWorkspace /> :
                enrichView === 'resolve' ? <EntityResolutionTab /> :
                <RegistryTab />}
