@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+from copy import deepcopy
 
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
@@ -70,18 +71,34 @@ class LLMOntologyGenerator:
         instructions = (
             f"You are an ontology generator. Read the following text and produce a concise ontology in JSON. "
             f"Use '{base_uri}' for IRIs when missing. Only output valid JSON. "
-            f"Prefer '{name}' as ontology name if appropriate."
+            f"Prefer '{name}' as ontology name if appropriate. "
+            "Declare every referenced class and property. Names must be unique identifiers "
+            "(letters, digits, underscores; start with a letter). Use null for absent parent. "
+            "Extract only axioms supported by the text; do not invent facts or rules. "
+            "Optional named axioms: classes may include equivalentClass (name or list); "
+            "properties may include subPropertyOf, inverseOf (name or list), "
+            "transitive and symmetric (booleans). Parent may be a name or list. "
+            "Keep constraints or complex class expressions explicitly in separate fields "
+            "such as disjointWith or restrictions; never approximate them as inheritance. "
+            "Do not output executable rule strings or code."
         )
         return f"{instructions}\n\nTEXT:\n{text}\n\nJSON SCHEMA EXAMPLE:\n{schema}"
 
     def _normalize_output(self, result: Dict[str, Any], **meta) -> Dict[str, Any]:
-        classes = result.get("classes") or result.get("Classes") or []
-        properties = result.get("properties") or result.get("Properties") or []
+        if not isinstance(result, dict):
+            raise ValidationError("Ontology response must be a JSON object")
+        classes = result.get("classes", result.get("Classes", []))
+        classes = [] if classes is None else classes
+        properties = result.get("properties", result.get("Properties", []))
+        properties = [] if properties is None else properties
+        for collection in (classes, properties):
+            if not isinstance(collection, list) or any(not isinstance(item, dict) for item in collection):
+                raise ValidationError("Ontology classes and properties must be lists of objects")
 
         def ensure_uri(name: str, uri: Optional[str]) -> str:
             if uri:
                 return uri
-            base = meta.get("base_uri") or "https://example.org/ontology/"
+            base = meta.get("base_uri") or result.get("base_uri") or "https://example.org/ontology/"
             return f"{base}{name}"
 
         normalized_classes: List[Dict[str, Any]] = []
@@ -89,26 +106,30 @@ class LLMOntologyGenerator:
             cname = cls.get("name") or cls.get("Name") or "Class"
             normalized_classes.append(
                 {
+                    **deepcopy({k: v for k, v in cls.items()
+                                if k not in {"Name", "IRI", "Label", "Description", "Parent"}}),
                     "name": cname,
                     "uri": ensure_uri(cname, cls.get("uri") or cls.get("IRI")),
                     "label": cls.get("label") or cls.get("Label"),
                     "comment": cls.get("comment") or cls.get("Description"),
-                    "parent": cls.get("parent") or cls.get("Parent"),
+                    "parent": cls.get("parent", cls.get("Parent")),
                 }
             )
 
         normalized_properties: List[Dict[str, Any]] = []
         for prop in properties:
             pname = prop.get("name") or prop.get("Name") or "property"
-            dom = prop.get("domain") or prop.get("Domain") or []
-            rng = prop.get("range") or prop.get("Range") or []
-            ptype = prop.get("type") or prop.get("Type") or "object"
+            dom = prop.get("domain", prop.get("Domain", []))
+            rng = prop.get("range", prop.get("Range", []))
+            ptype = prop.get("type", prop.get("Type", prop.get("@type", "object")))
             normalized_properties.append(
                 {
+                    **deepcopy({k: v for k, v in prop.items()
+                                if k not in {"Name", "IRI", "Domain", "Range", "Type", "Label", "Description"}}),
                     "name": pname,
                     "type": ptype,
-                    "domain": dom if isinstance(dom, list) else [dom] if dom else [],
-                    "range": rng if isinstance(rng, list) else [rng] if rng else [],
+                    "domain": dom if isinstance(dom, list) else [] if dom is None else [dom],
+                    "range": rng if isinstance(rng, list) else [] if rng is None else [rng],
                     "label": prop.get("label") or prop.get("Label"),
                     "comment": prop.get("comment") or prop.get("Description"),
                     "uri": ensure_uri(pname, prop.get("uri") or prop.get("IRI")),
@@ -116,6 +137,7 @@ class LLMOntologyGenerator:
             )
 
         ontology: Dict[str, Any] = {
+            **deepcopy({k: v for k, v in result.items() if k not in {"Classes", "Properties"}}),
             "uri": meta.get("base_uri") or result.get("base_uri"),
             "name": meta.get("name") or result.get("name"),
             "version": meta.get("version") or result.get("version") or "1.0",
