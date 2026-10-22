@@ -320,3 +320,134 @@ ontology_data = ingest_ontology("schema.jsonld")  # JSON-LD
 - [Knowledge Graph](/reference/kg) — The graph being modeled by the ontology.
 - [Export](/reference/export) — Export ontologies as RDF, OWL, or JSON-LD.
 - [Conflicts](/reference/conflicts) — Detect ontology constraint violations.
+
+## OWL consistency and class satisfiability
+
+Install the optional backend and put a working Java runtime on `PATH` (tested
+with Java 17 and Owlready2 0.49; the extra pins this compatible version):
+
+```bash
+pip install 'semantica[owl]'
+java -version
+```
+
+```python
+from semantica.ontology.ontology_validator import OntologyValidator
+
+result = OntologyValidator(reasoner="hermit").validate("ontology.ttl")
+# reasoner="pellet" selects Pellet; "auto" tries HermiT, then Pellet on
+# execution failure. A logical inconsistency does not trigger fallback.
+print(result.valid, result.consistent, result.satisfiable)
+print(result.unsatisfiable_classes, result.errors)
+```
+
+The validator loads each input into an isolated Owlready2 World, performs real
+classification, and closes the World afterward. Files are parsed with RDFLib
+and converted to RDF/XML. Use `input_format="turtle"` for files without a
+recognizable extension. Imported ontologies are loaded by Owlready2 and must be
+resolvable; load or backend failures are reported in `errors`.
+
+- `consistent=True` means the whole ontology has a model.
+- `satisfiable=True` means every named class, excluding `owl:Nothing`, is
+  satisfiable. A consistent ontology can still contain an empty, unsatisfiable
+  class; its IRI is returned in `unsatisfiable_classes` and `valid` is false.
+- `None` means a check was disabled or its result is unknown. Missing dependencies,
+  Java failures, and parse errors set `valid=False`; they never imply consistency.
+- A globally inconsistent ontology sets `consistent=False`; class satisfiability
+  remains unknown because classification did not complete.
+
+Schema dictionaries are also accepted through the existing OWL exporter (including
+normalization of `parent` to `subClassOf`). They support only the axioms that exporter
+can express. To validate restrictions, disjointness, individuals, and other complex
+OWL axioms, supply an OWL/RDF file; these are not inferred from arbitrary dictionary
+keys. Validation does not modify the source schema or save inferred triples.
+
+Both checks are enabled by default, including when the validator is used by
+`OntologyEngine` or the ontology quality gate. For structural/syntax checking
+without Java or Owlready2, explicitly use:
+
+```python
+validator = OntologyValidator(check_consistency=False, check_satisfiability=False)
+```
+
+`check_constraint()` does not evaluate arbitrary strings and raises
+`NotImplementedError`. Use `OntologyEngine.validate_graph()` for SHACL constraints.
+The `validate_ontology(..., method="hermit" | "pellet" | "auto")` convenience
+function honors backend selection and returns the same result fields as a dictionary.
+
+Backend semantics follow the [Owlready2 reasoning documentation](https://owlready2.readthedocs.io/en/v0.49/reasoning.html).
+
+## Compile text-generated ontologies into inference rules
+
+`OntologyEngine.from_text()` now automatically compiles the generated schema into
+positive Horn rules. The returned dictionary includes a JSON-compatible
+`rule_compilation` artifact with `rules`, `symbols`, and `diagnostics`. This step
+is deterministic; only the preceding text extraction calls an LLM.
+
+```python
+from semantica.ontology import OntologyEngine
+from semantica.reasoning import Reasoner
+
+engine = OntologyEngine(provider="openai", model="YOUR_MODEL")
+reasoner = Reasoner()
+ontology = engine.from_text(
+    "Employee is a subclass of Person. worksFor is an object property "
+    "with domain Employee and range Organization. "
+    "Use exactly these class and property names.",
+    reasoner=reasoner,
+)
+
+# Inspect the generated predicates and axioms before supplying your facts.
+print(ontology["rule_compilation"])
+results = reasoner.infer_with_results(["worksFor(Alice, Acme)"])
+for result in results:
+    print(result.conclusion, result.premises, result.rule_used.metadata)
+# Given the specified schema: Employee(Alice), Person(Alice), Organization(Acme).
+```
+
+Alternatively, call `engine.to_reasoner(ontology)` to compile and load a fresh
+reasoner, or `engine.compile_rules(ontology)` to get `RuleCompilationResult`
+without loading anything. `OntologyRuleCompiler` is also exported for use without
+constructing an engine or LLM provider. `to_reasoner()` always recompiles the
+current schema; it never executes a cached/model-authored `rule_compilation` field.
+
+| Schema axiom | Generated implication |
+| --- | --- |
+| `Employee.parent = Person` (also `subClassOf`, `subclassOf`) | `Employee(?x) → Person(?x)` |
+| `Person.equivalentClass = Human` | Both class inclusion directions |
+| `worksFor.domain = Employee` | `worksFor(?x, ?y) → Employee(?x)` |
+| Object property `worksFor.range = Organization` | `worksFor(?x, ?y) → Organization(?y)` |
+| `p.subPropertyOf = q` | `p(?x, ?y) → q(?x, ?y)` |
+| Object property `p.inverseOf = q` | Both reversed-argument implications |
+| Object property `p.transitive = true` | `p(?x, ?y) AND p(?y, ?z) → p(?x, ?z)` |
+| Object property `p.symmetric = true` | `p(?x, ?y) → p(?y, ?x)` |
+
+Named references accept declared names or full declared IRIs. Predicate names
+must be unique identifiers across classes and properties; ambiguity is rejected
+instead of merging different terms. Multiple parents/domains/ranges produce one
+rule per named class (intersection semantics). Domain/range axioms infer types
+from an existing relation; they do **not** require or invent relation instances.
+Datatype ranges do not produce class facts. `owl:Thing` superclass/domain/range
+bounds are tautological and omitted; equivalence to `owl:Thing` is unsupported.
+
+Facts use the existing reasoner's predicate notation and spacing:
+`Employee(Alice)` and `worksFor(Alice, Acme)`. Use the predicate names shown in the
+artifact's symbol table; input IRI aliases are resolved in the schema, not in fact
+strings. This interface does not automatically ingest RDF triples or KG dictionaries.
+Rules carry deterministic IDs and source-axiom metadata; inference results retain
+matched premises. Repeated loading is idempotent under the existing rule deduplication.
+
+Strict compilation is the default. Unsupported fields (for example `disjointWith`,
+cardinality/required constraints, anonymous restrictions, or property chains),
+unresolved references, invalid names, and unresolved imports raise
+`OntologyRuleCompilationError` **before** any rules are loaded. The exception's
+`result` contains diagnostics and the reviewable supported subset. Model output
+normalization preserves these fields so they cannot disappear before compilation.
+Use `strict=False` only when you deliberately want that subset, and inspect
+`rule_compilation["diagnostics"]`. `compile_rules=False` restores schema-only
+`from_text()` behavior and cannot be combined with a target reasoner.
+
+This compiler implements the listed named positive fragment, not complete OWL DL
+reasoning or SHACL validation. Use the OWL validator for satisfiability/consistency
+and SHACL for data constraints. LLM extraction quality still determines whether the
+input axioms express the intended text; compilation is not a proof of that fidelity.

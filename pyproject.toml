@@ -119,6 +119,10 @@ parse-docling = ["docling>=2.132.0"]
 # pdfplumber powers the default PDFParser; not pulled in by any other extra.
 parse-pdf = ["pdfplumber>=0.10.0"]
 
+# ---- OWL reasoning (requires Java on PATH) ----
+# 0.51 bundles Pellet classes requiring Java 25; 0.49 is tested with Java 17.
+owl = ["owlready2==0.49"]
+
 # ---- SHACL Validation ----
 shacl = ["pyshacl>=0.25.0"]
 

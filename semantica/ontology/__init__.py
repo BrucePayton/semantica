@@ -139,6 +139,9 @@ from .competency_questions import CompetencyQuestion, CompetencyQuestionsManager
 from .config import OntologyConfig, ontology_config
 from .domain_ontologies import DomainOntologies
 from .llm_generator import LLMOntologyGenerator
+from .rule_compiler import (
+    OntologyRuleCompiler, RuleCompilationResult, OntologyRuleCompilationError,
+)
 from .engine import OntologyEngine
 from .module_manager import ModuleManager, OntologyModule
 from .namespace_manager import NamespaceManager
@@ -234,6 +237,9 @@ __all__ = [
     "method_registry",
     "LLMOntologyGenerator",
     "OntologyEngine",
+    "OntologyRuleCompiler",
+    "RuleCompilationResult",
+    "OntologyRuleCompilationError",
     # Configuration
     "OntologyConfig",
     "ontology_config",

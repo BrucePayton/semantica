@@ -11,6 +11,8 @@ from .ontology_evaluator import OntologyEvaluator
 from .ontology_validator import OntologyValidator
 from .quality_gate import OntologyQualityGate, OntologyQualityReport
 from .llm_generator import LLMOntologyGenerator
+from .rule_compiler import OntologyRuleCompiler, RuleCompilationResult
+from ..reasoning.reasoner import Reasoner
 from ..semantic_extract.triplet_extractor import Triplet
 
 
@@ -30,6 +32,7 @@ class OntologyEngine:
             validator=self.validator, evaluator=self.evaluator
         )
         self.llm = LLMOntologyGenerator(**config)
+        self.rule_compiler = OntologyRuleCompiler()
         self.store = config.get("store")
 
         # Deferred to avoid circular import: change_management → ontology → change_management
@@ -50,10 +53,40 @@ class OntologyEngine:
             self.progress.update_tracking(tracking_id, message="Generation failed")
             raise
 
-    def from_text(self, text: str, provider: Optional[str] = None, model: Optional[str] = None, **options) -> Dict[str, Any]:
+    def from_text(
+        self, text: str, provider: Optional[str] = None, model: Optional[str] = None,
+        *, compile_rules: bool = True, strict: bool = True,
+        reasoner: Optional[Reasoner] = None, **options,
+    ) -> Dict[str, Any]:
+        """Generate a schema and automatically compile its supported named axioms.
+
+        The JSON-compatible ``rule_compilation`` artifact contains rules, symbols,
+        and diagnostics. If supplied, ``reasoner`` receives the compiled rules.
+        Compilation is strict by default; unsupported axioms raise before loading.
+        Set compile_rules=False to obtain only the schema (legacy behavior).
+        """
+        if reasoner is not None and not compile_rules:
+            raise ValueError("reasoner requires compile_rules=True")
         if provider:
             self.llm.set_provider(provider, model=model)
-        return self.llm.generate_ontology_from_text(text, **options)
+        ontology = self.llm.generate_ontology_from_text(text, **options)
+        if compile_rules:
+            compiled = (self.rule_compiler.load(ontology, reasoner, strict=strict)
+                        if reasoner is not None else self.compile_rules(ontology, strict=strict))
+            ontology["rule_compilation"] = compiled.to_dict()
+        return ontology
+
+    def compile_rules(self, ontology: Dict[str, Any], *, strict: bool = True) -> RuleCompilationResult:
+        """Compile a generated or hand-authored ontology without calling an LLM."""
+        return self.rule_compiler.compile(ontology, strict=strict)
+
+    def to_reasoner(self, ontology: Dict[str, Any], *, strict: bool = True) -> Reasoner:
+        """Create a fresh rule reasoner from the current schema, never cached rules."""
+        reasoner = Reasoner()
+        compiled = self.rule_compiler.load(ontology, reasoner, strict=strict)
+        for diagnostic in compiled.diagnostics:
+            self.logger.warning("Ontology rule compilation: %s", diagnostic)
+        return reasoner
 
     def infer_classes(self, entities: List[Dict[str, Any]], **options) -> List[Dict[str, Any]]:
         return self.inferrer.infer_classes(entities, **options)

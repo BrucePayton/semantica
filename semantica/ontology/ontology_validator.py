@@ -12,7 +12,10 @@ Key Features:
 """
 
 from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from io import BytesIO
+from copy import deepcopy
 
 from ..utils.logging import get_logger
 
@@ -291,10 +294,12 @@ def _run_pyshacl(
 class ValidationResult:
     """Result of an ontology validation operation."""
     valid: bool = True
-    consistent: bool = True
-    satisfiable: bool = True
+    consistent: Optional[bool] = None
+    satisfiable: Optional[bool] = None
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    unsatisfiable_classes: List[str] = field(default_factory=list)
+    reasoner_used: Optional[str] = None
 
 class OntologyValidator:
     """
@@ -318,47 +323,103 @@ class OntologyValidator:
             **kwargs: Additional configuration
         """
         self.logger = get_logger("ontology_validator")
+        if reasoner not in {"hermit", "pellet", "auto"}:
+            raise ValueError("reasoner must be hermit, pellet, or auto")
         self.reasoner = reasoner
         self.check_consistency = check_consistency
         self.check_satisfiability = check_satisfiability
         self.config = kwargs
 
-    def validate(self, ontology: Union[Dict[str, Any], str]) -> ValidationResult:
+    def validate(self, ontology: Union[Dict[str, Any], str, Path]) -> ValidationResult:
+        """Validate a schema dictionary or local RDF file using Owlready2.
+
+        ``consistent`` concerns the whole ontology; ``satisfiable`` means all
+        named classes except owl:Nothing are satisfiable. None means unchecked
+        or unknown (including backend failure). Each call uses an isolated World.
+        ``auto`` tries HermiT, then Pellet only after an execution failure.
+        Set both check flags to False for structural/syntax validation only.
         """
-        Validate an ontology structure or file.
-        
-        Args:
-            ontology: Ontology dictionary or path to ontology file
-            
-        Returns:
-            ValidationResult object
-        """
-        self.logger.info(f"Validating ontology using {self.reasoner} reasoner")
-        
         result = ValidationResult()
-        
-        # Placeholder implementation for now
-        # In a real implementation, this would load owlready2 or similar
-        
         try:
             if isinstance(ontology, dict):
                 self._validate_structure(ontology, result)
-            
-            # Simulate reasoning checks
-            if self.check_consistency:
-                # Logic to check consistency would go here
-                pass
-                
-            if self.check_satisfiability:
-                # Logic to check satisfiability would go here
-                pass
-                
-        except Exception as e:
-            self.logger.error(f"Validation failed: {str(e)}")
+            payload = self._rdf_payload(ontology)
+            if not (self.check_consistency or self.check_satisfiability):
+                return result
+            try:
+                import owlready2
+            except ImportError as exc:
+                raise ImportError(
+                    "OWL reasoning requires owlready2: pip install 'semantica[owl]'. "
+                    "A Java runtime must also be available on PATH."
+                ) from exc
+
+            backends = ("hermit", "pellet") if self.reasoner == "auto" else (self.reasoner,)
+            for index, backend in enumerate(backends):
+                world = owlready2.World()
+                try:
+                    world.get_ontology("urn:semantica:validation").load(
+                        fileobj=BytesIO(payload), format="rdfxml"
+                    )
+                    runner = (owlready2.sync_reasoner if backend == "hermit"
+                              else owlready2.sync_reasoner_pellet)
+                    runner(world, debug=0)
+                    result.reasoner_used = backend
+                    if self.check_consistency:
+                        result.consistent = True
+                    if self.check_satisfiability:
+                        result.unsatisfiable_classes = sorted(
+                            cls.iri for cls in world.inconsistent_classes()
+                            if cls != owlready2.Nothing
+                        )
+                        result.satisfiable = not result.unsatisfiable_classes
+                        if not result.satisfiable:
+                            result.valid = False
+                            result.errors.append(
+                                "Unsatisfiable classes: " + ", ".join(result.unsatisfiable_classes)
+                            )
+                    break
+                except owlready2.OwlReadyInconsistentOntologyError:
+                    result.reasoner_used = backend
+                    result.valid = False
+                    # Inconsistency is established even when only class checking
+                    # was requested. Class-level results remain unknown.
+                    result.consistent = False
+                    result.errors.append("OWL ontology is inconsistent.")
+                    break
+                except Exception as exc:
+                    if index + 1 == len(backends):
+                        raise RuntimeError(
+                            f"{backend} reasoning failed; check Java and ontology imports: {exc}"
+                        ) from exc
+                    result.warnings.append(f"{backend} failed; trying Pellet: {exc}")
+                finally:
+                    world.close()
+        except Exception as exc:
+            self.logger.error("Ontology validation failed: %s", exc)
             result.valid = False
-            result.errors.append(str(e))
-            
+            result.errors.append(str(exc))
         return result
+
+    def _rdf_payload(self, ontology: Union[Dict[str, Any], str, Path]) -> bytes:
+        """Normalize supported RDF inputs to the RDF/XML accepted by Owlready2."""
+        from rdflib import Graph
+
+        if isinstance(ontology, dict):
+            from .owl_generator import OWLGenerator
+
+            schema = deepcopy(ontology)
+            for cls in schema.get("classes", []):
+                if cls.get("parent") and not (cls.get("subClassOf") or cls.get("subclassOf")):
+                    cls["subClassOf"] = cls["parent"]
+            serialized = OWLGenerator().generate_owl(schema, format="rdfxml")
+            graph = Graph().parse(data=serialized, format="xml")
+        elif isinstance(ontology, (str, Path)):
+            path = Path(ontology).expanduser().resolve(strict=True)
+            graph = Graph().parse(str(path), format=self.config.get("input_format"))
+        else:
+            raise TypeError("ontology must be a schema dictionary or local RDF file path")
+        return graph.serialize(format="xml", encoding="utf-8")
 
     def _validate_structure(self, ontology: Dict[str, Any], result: ValidationResult):
         """Basic structural validation."""
@@ -375,30 +436,24 @@ class OntologyValidator:
         Args:
             constraint: Constraint description or SPARQL query
             
-        Returns:
-            True if constraint is met, False otherwise
+        Raises:
+            NotImplementedError: Arbitrary strings are not OWL axioms or SHACL shapes.
         """
-        # Placeholder implementation
-        return True
+        raise NotImplementedError(
+            "Use OntologyEngine.validate_graph() for SHACL constraints; "
+            "arbitrary constraint strings are not evaluated by the OWL validator."
+        )
 
-def validate_ontology(ontology: Union[Dict[str, Any], str], method: str = "default") -> Dict[str, Any]:
+def validate_ontology(ontology: Union[Dict[str, Any], str, Path], method: str = "default") -> Dict[str, Any]:
     """
     Convenience wrapper for ontology validation.
     
     Args:
         ontology: Ontology to validate
-        method: Validation method
+        method: Backend selection (default/hermit, pellet, or auto).
         
     Returns:
         Dictionary representation of validation result
     """
-    validator = OntologyValidator()
-    result = validator.validate(ontology)
-    
-    return {
-        "valid": result.valid,
-        "consistent": result.consistent,
-        "satisfiable": result.satisfiable,
-        "errors": result.errors,
-        "warnings": result.warnings
-    }
+    validator = OntologyValidator(reasoner="hermit" if method == "default" else method)
+    return asdict(validator.validate(ontology))
